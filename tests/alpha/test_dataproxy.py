@@ -1,9 +1,10 @@
 ﻿from datetime import datetime, timedelta
 
+import pytest
 import numpy as np
 import polars as pl
 
-from vnpy.alpha.dataset.utility import DataProxy
+from vnpy.alpha.dataset.utility import DataProxy, calculate_by_expression, register_functions
 
 
 def make_test_df() -> pl.DataFrame:
@@ -104,3 +105,40 @@ def test_dataproxy_between_proxy_comparisons() -> None:
     assert_int_data(x <= y, [1, 0, 1, 0])
     assert_int_data(x == y, [0, 0, 0, 0])
     assert_int_data(x != y, [1, 1, 1, 1])
+
+
+def test_calculate_by_expression_keeps_valid_arithmetic_and_function_calls() -> None:
+    df = make_test_df()
+
+    arithmetic = calculate_by_expression(df, "x + y * 2")
+    delayed = calculate_by_expression(df, "ts_delay(x, 1)")
+    ranked = calculate_by_expression(df, "cs_rank(x)")
+
+    np.testing.assert_allclose(arithmetic["data"].to_numpy(), np.array([5, 7, 8, 6], dtype=float))
+    assert delayed["data"].to_list() == [None, 1, 3, 2]
+    assert ranked.columns == ["datetime", "vt_symbol", "data"]
+
+
+def test_calculate_by_expression_supports_registered_functions() -> None:
+    def double(feature: DataProxy) -> DataProxy:
+        return feature * 2
+
+    register_functions([double])
+    result = calculate_by_expression(make_test_df(), "double(x)")
+
+    np.testing.assert_allclose(result["data"].to_numpy(), np.array([2, 6, 4, 8], dtype=float))
+
+
+@pytest.mark.parametrize(
+    "expression, message",
+    [
+        ("__import__('os').system('echo unsafe')", "Unsupported expression syntax"),
+        ("x.__class__", "Unsupported expression syntax"),
+        ("lambda value: value", "Unsupported expression syntax"),
+        ("[x for x in y]", "Unsupported expression syntax"),
+        ("missing_column + 1", "Unknown expression name"),
+    ],
+)
+def test_calculate_by_expression_rejects_unsafe_or_unknown_syntax(expression: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        calculate_by_expression(make_test_df(), expression)

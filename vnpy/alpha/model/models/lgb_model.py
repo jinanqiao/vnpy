@@ -1,12 +1,35 @@
+from __future__ import annotations
+
 from typing import cast
 
 import numpy as np
 import polars as pl
-import lightgbm as lgb
-import matplotlib.pyplot as plt
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:  # pragma: no cover - plotting is optional for model detail
+    plt = None  # type: ignore[assignment]
+
+try:
+    import lightgbm as lgb
+except ImportError:  # pragma: no cover - exercised in dependency-boundary tests
+    lgb = None  # type: ignore[assignment]
 
 from vnpy.alpha.dataset import AlphaDataset, Segment
 from vnpy.alpha.model import AlphaModel
+from vnpy.alpha.optional import require_optional_dependency
+
+
+def require_lightgbm():
+    if lgb is not None:
+        return lgb
+    return require_optional_dependency("lightgbm", "LightGBM alpha model")
+
+
+def require_matplotlib():
+    if plt is not None:
+        return plt
+    return require_optional_dependency("matplotlib", "LightGBM feature-importance plotting")
 
 
 class LgbModel(AlphaModel):
@@ -37,6 +60,7 @@ class LgbModel(AlphaModel):
         seed : int | None
             Random seed
         """
+        lgb_module = require_lightgbm()
         self.params: dict = {
             "objective": "mse",
             "learning_rate": learning_rate,
@@ -48,7 +72,7 @@ class LgbModel(AlphaModel):
         self.early_stopping_rounds: int = early_stopping_rounds
         self.log_evaluation_period: int = log_evaluation_period
 
-        self.model: lgb.Booster | None = None
+        self.model: lgb_module.Booster | None = None
 
     def _prepare_data(self, dataset: AlphaDataset) -> list[lgb.Dataset]:
         """
@@ -64,7 +88,8 @@ class LgbModel(AlphaModel):
         list[lgb.Dataset]
             List of LightGBM datasets for training and validation
         """
-        ds: list[lgb.Dataset] = []
+        lgb_module = require_lightgbm()
+        ds: list[lgb_module.Dataset] = []
 
         # Process training and validation separately
         for segment in [Segment.TRAIN, Segment.VALID]:
@@ -77,7 +102,7 @@ class LgbModel(AlphaModel):
             label = np.array(df["label"])
 
             # Add training data
-            ds.append(lgb.Dataset(data, label=label))
+            ds.append(lgb_module.Dataset(data, label=label))
 
         return ds
 
@@ -98,15 +123,16 @@ class LgbModel(AlphaModel):
         ds: list[lgb.Dataset] = self._prepare_data(dataset)
 
         # Execute model training
-        self.model = lgb.train(
+        lgb_module = require_lightgbm()
+        self.model = lgb_module.train(
             self.params,
             ds[0],
             num_boost_round=self.num_boost_round,
             valid_sets=ds,
             valid_names=["train", "valid"],
             callbacks=[
-                lgb.early_stopping(self.early_stopping_rounds),      # Early stopping callback
-                lgb.log_evaluation(self.log_evaluation_period)       # Logging callback
+                lgb_module.early_stopping(self.early_stopping_rounds),      # Early stopping callback
+                lgb_module.log_evaluation(self.log_evaluation_period)       # Logging callback
             ]
         )
 
@@ -160,8 +186,10 @@ class LgbModel(AlphaModel):
         if not self.model:
             return
 
+        plt_module = require_matplotlib()
         for importance_type in ["split", "gain"]:
-            ax: plt.Axes = lgb.plot_importance(
+            lgb_module = require_lightgbm()
+            ax: plt_module.Axes = lgb_module.plot_importance(
                 self.model,
                 max_num_features=50,
                 importance_type=importance_type,

@@ -1,14 +1,22 @@
+from __future__ import annotations
+
 import copy
-from collections import defaultdict
 from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
-import polars as pl
 from sklearn.metrics import mean_squared_error      # type: ignore
-import torch
-import torch.nn as nn
-import torch.optim as optim
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+except ImportError:  # pragma: no cover - exercised in dependency-boundary tests
+    torch = None  # type: ignore[assignment]
+    nn = None  # type: ignore[assignment]
+    optim = None  # type: ignore[assignment]
+
+_TorchModuleBase = nn.Module if nn is not None else object
 
 from vnpy.alpha import (
     AlphaDataset,
@@ -16,6 +24,13 @@ from vnpy.alpha import (
     Segment,
     logger
 )
+from .mlp_components import (
+    MlpBatchPredictor,
+    MlpDatasetAdapter,
+    MlpFeatureDetail,
+    MlpTrainingLoop,
+)
+from .mlp_components import require_torch
 
 
 
@@ -74,6 +89,10 @@ class MlpModel(AlphaModel):
         device : str, default "cpu"
             Training device
         """
+        torch_module = require_torch()
+        if nn is None or optim is None:
+            require_torch()
+
         # Save model hyperparameters
         self.input_size: int = input_size
         self.hidden_sizes: tuple[int] = hidden_sizes
@@ -90,7 +109,7 @@ class MlpModel(AlphaModel):
         # Set random seed for reproducibility
         if seed is not None:
             np.random.seed(seed)
-            torch.manual_seed(seed)
+            torch_module.manual_seed(seed)
 
         # Set loss function type
         self._scorer = mean_squared_error
@@ -133,6 +152,10 @@ class MlpModel(AlphaModel):
             min_lr=0.00001,
             eps=1e-08,
         )
+        self.data_adapter = MlpDatasetAdapter()
+        self.training_loop = MlpTrainingLoop(self)
+        self.batch_predictor = MlpBatchPredictor()
+        self.feature_detail = MlpFeatureDetail()
 
     def fit(
         self,
@@ -159,60 +182,12 @@ class MlpModel(AlphaModel):
         if evaluation_results is None:
             evaluation_results = {}
 
-        # Dictionary to store training and validation data
-        train_valid_data: dict[str, dict] = defaultdict(dict)
-
-        # Process training and validation sets separately
-        for segment in [Segment.TRAIN, Segment.VALID]:
-            # Get learning data and sort by time and trading code
-            df: pl.DataFrame = dataset.fetch_learn(segment)
-            df = df.sort(["datetime", "vt_symbol"])
-
-            # Extract features and labels
-            features = df.select(df.columns[2: -1]).to_numpy()
-            labels = np.array(df["label"])
-
-            # Store feature and label data
-            train_valid_data["x"][segment] = torch.from_numpy(features).float().to(self.device)
-            train_valid_data["y"][segment] = torch.from_numpy(labels).float().to(self.device)
-
-            # Initialize evaluation results list
-            evaluation_results[segment] = []
-
-        # Get feature names
-        df = dataset.fetch_learn(Segment.TRAIN)
-        self.feature_names = df.columns[2:-1]
-
-        # Initialize training state
-        early_stop_count: int = 0           # Number of steps without performance improvement
-        train_loss: float = 0               # Current training loss
-        best_valid_score: float = np.inf    # Best validation loss
-        best_params = None                  # Best model parameters
-
-        train_samples: int = train_valid_data["y"][Segment.TRAIN].shape[0]
-
-        # Iterate through training steps
-        for step in range(1, self.n_epochs + 1):
-            # Check if early stopping condition is met
-            if early_stop_count >= self.early_stop_rounds:
-                logger.info("达到早停条件,训练结束")
-                break
-
-            # Train one batch
-            batch_loss = self._train_step(train_valid_data, train_samples)
-            train_loss += batch_loss
-
-            # Periodically evaluate the model
-            if step % self.eval_steps == 0 or step == self.n_epochs:
-                early_stop_count, best_valid_score, best_params = self._evaluate_step(
-                    train_valid_data,
-                    evaluation_results,
-                    step,
-                    train_loss,
-                    early_stop_count,
-                    best_valid_score
-                )
-                train_loss = 0
+        train_valid_data, self.feature_names = self.data_adapter.prepare_train_valid(
+            dataset,
+            self.device,
+            evaluation_results,
+        )
+        best_params = self.training_loop.run(train_valid_data, evaluation_results)
 
         # Mark model as trained
         self.fitted = True
@@ -364,22 +339,7 @@ class MlpModel(AlphaModel):
         np.ndarray | torch.Tensor
             Model prediction results
         """
-        data = data.to(self.device)
-
-        predictions: list[torch.Tensor] = []
-
-        self.model.eval()
-
-        with torch.no_grad():
-            batch_size: int = 8096
-            for i in range(0, len(data), batch_size):
-                x: torch.Tensor = data[i: i + batch_size]
-                predictions.append(self.model(x.to(self.device)).detach().reshape(-1))
-
-        if return_cpu:
-            return np.concatenate([pr.cpu().numpy() for pr in predictions])
-        else:
-            return torch.cat(predictions, dim=0)
+        return self.batch_predictor.predict(self.model, data, self.device, return_cpu=return_cpu)
 
     def predict(self, dataset: AlphaDataset, segment: Segment) -> np.ndarray:
         """
@@ -400,10 +360,7 @@ class MlpModel(AlphaModel):
         if not self.fitted:
             raise ValueError("Model has not been trained yet!")
 
-        df: pl.DataFrame = dataset.fetch_infer(segment)
-        df = df.sort(["datetime", "vt_symbol"])
-
-        data: np.ndarray = df.select(df.columns[2: -1]).to_numpy()
+        data: np.ndarray = self.data_adapter.prepare_infer(dataset, segment)
 
         return cast(np.ndarray, self._predict_batch(torch.Tensor(data)))
 
@@ -464,30 +421,12 @@ class MlpModel(AlphaModel):
         pd.DataFrame
             Feature importance dataframe
         """
-        self.model.eval()
-        importance_dict: dict[str, float] = {}
-
-        test_data = torch.randn(1000, self.input_size).to(self.device)
-        base_pred = self.model(test_data).detach()
-
-        noise_level = 0.1
-        for i, feature_name in enumerate(self.feature_names):
-            perturbed_data = test_data.clone()
-            perturbed_data[:, i] += torch.randn(1000).to(self.device) * noise_level
-
-            with torch.no_grad():
-                new_pred = self.model(perturbed_data)
-                importance = torch.std(torch.abs(new_pred - base_pred)).item()
-                importance_dict[feature_name] = importance
-
-        df: pd.DataFrame = pd.DataFrame({
-            "Feature": list(importance_dict.keys()),
-            "Importance": list(importance_dict.values())
-        })
-        df = df.sort_values("Importance", ascending=False)
-        df = df.set_index("Feature")
-
-        return df
+        return self.feature_detail.calculate(
+            self.model,
+            self.feature_names,
+            self.input_size,
+            self.device,
+        )
 
 
 class AverageMeter:
@@ -550,7 +489,7 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-class MlpNetwork(nn.Module):
+class MlpNetwork(_TorchModuleBase):
     """
     Deep Neural Network Model Structure
 
@@ -587,6 +526,7 @@ class MlpNetwork(nn.Module):
             - "LeakyReLU": Leaky ReLU function
             - "SiLU": Sigmoid Linear Unit function
         """
+        require_torch()
         super().__init__()
 
         # Build network layers

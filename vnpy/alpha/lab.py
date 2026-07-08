@@ -1,20 +1,20 @@
-import json
-import shelve
-import pickle
 from pathlib import Path
-from datetime import datetime, timedelta
-from collections import defaultdict
-from functools import lru_cache
+from datetime import datetime
 
 import polars as pl
 
 from vnpy.trader.object import BarData
 from vnpy.trader.constant import Interval
-from vnpy.trader.utility import extract_vt_symbol
 
-from .logger import logger
-from .dataset import AlphaDataset, to_datetime
+from .dataset import AlphaDataset
 from .model import AlphaModel
+from .storage import (
+    BarRepository,
+    ComponentRepository,
+    ContractRepository,
+    PickleArtifactStore,
+    SignalStore,
+)
 
 
 class AlphaLab:
@@ -48,50 +48,16 @@ class AlphaLab:
             if not path.exists():
                 path.mkdir(parents=True)
 
+        self.bar_repository: BarRepository = BarRepository(self.daily_path, self.minute_path)
+        self.component_repository: ComponentRepository = ComponentRepository(self.component_path)
+        self.contract_repository: ContractRepository = ContractRepository(self.contract_path)
+        self.dataset_store: PickleArtifactStore = PickleArtifactStore(self.dataset_path, "Dataset")
+        self.model_store: PickleArtifactStore = PickleArtifactStore(self.model_path, "Model")
+        self.signal_store: SignalStore = SignalStore(self.signal_path)
+
     def save_bar_data(self, bars: list[BarData]) -> None:
         """Save bar data"""
-        if not bars:
-            return
-
-        # Get file path
-        bar: BarData = bars[0]
-
-        if bar.interval == Interval.DAILY:
-            file_path: Path = self.daily_path.joinpath(f"{bar.vt_symbol}.parquet")
-        elif bar.interval == Interval.MINUTE:
-            file_path = self.minute_path.joinpath(f"{bar.vt_symbol}.parquet")
-        elif bar.interval:
-            logger.error(f"Unsupported interval {bar.interval.value}")
-            return
-
-        data: list = []
-        for bar in bars:
-            bar_data: dict = {
-                "datetime": bar.datetime.replace(tzinfo=None),
-                "open": bar.open_price,
-                "high": bar.high_price,
-                "low": bar.low_price,
-                "close": bar.close_price,
-                "volume": bar.volume,
-                "turnover": bar.turnover,
-                "open_interest": bar.open_interest
-            }
-            data.append(bar_data)
-
-        new_df: pl.DataFrame = pl.DataFrame(data)
-
-        # If file exists, read and merge
-        if file_path.exists():
-            old_df: pl.DataFrame = pl.read_parquet(file_path)
-
-            new_df = pl.concat([old_df, new_df])
-
-            new_df = new_df.unique(subset=["datetime"])
-
-            new_df = new_df.sort("datetime")
-
-        # Save to file
-        new_df.write_parquet(file_path)
+        self.bar_repository.save(bars)
 
     def load_bar_data(
         self,
@@ -101,57 +67,7 @@ class AlphaLab:
         end: datetime | str
     ) -> list[BarData]:
         """Load bar data"""
-        # Convert types
-        if isinstance(interval, str):
-            interval = Interval(interval)
-
-        start = to_datetime(start)
-        end = to_datetime(end)
-
-        # Get folder path
-        if interval == Interval.DAILY:
-            folder_path: Path = self.daily_path
-        elif interval == Interval.MINUTE:
-            folder_path = self.minute_path
-        else:
-            logger.error(f"Unsupported interval {interval.value}")
-            return []
-
-        # Check if file exists
-        file_path: Path = folder_path.joinpath(f"{vt_symbol}.parquet")
-        if not file_path.exists():
-            logger.error(f"File {file_path} does not exist")
-            return []
-
-        # Open file
-        df: pl.DataFrame = pl.read_parquet(file_path)
-
-        # Filter by date range
-        df = df.filter((pl.col("datetime") >= start) & (pl.col("datetime") <= end))
-
-        # Convert to BarData objects
-        bars: list[BarData] = []
-
-        symbol, exchange = extract_vt_symbol(vt_symbol)
-
-        for row in df.iter_rows(named=True):
-            bar = BarData(
-                symbol=symbol,
-                exchange=exchange,
-                datetime=row["datetime"],
-                interval=interval,
-                open_price=row["open"],
-                high_price=row["high"],
-                low_price=row["low"],
-                close_price=row["close"],
-                volume=row["volume"],
-                turnover=row["turnover"],
-                open_interest=row["open_interest"],
-                gateway_name="DB"
-            )
-            bars.append(bar)
-
-        return bars
+        return self.bar_repository.load(vt_symbol, interval, start, end)
 
     def load_bar_df(
         self,
@@ -162,85 +78,7 @@ class AlphaLab:
         extended_days: int
     ) -> pl.DataFrame | None:
         """Load bar data as DataFrame"""
-        if not vt_symbols:
-            return None
-
-        # Convert types
-        if isinstance(interval, str):
-            interval = Interval(interval)
-
-        start = to_datetime(start) - timedelta(days=extended_days)
-        end = to_datetime(end) + timedelta(days=extended_days // 10)
-
-        # Get folder path
-        if interval == Interval.DAILY:
-            folder_path: Path = self.daily_path
-        elif interval == Interval.MINUTE:
-            folder_path = self.minute_path
-        else:
-            logger.error(f"Unsupported interval {interval.value}")
-            return None
-
-        # Read data for each symbol
-        dfs: list = []
-
-        for vt_symbol in vt_symbols:
-            # Check if file exists
-            file_path: Path = folder_path.joinpath(f"{vt_symbol}.parquet")
-            if not file_path.exists():
-                logger.error(f"File {file_path} does not exist")
-                continue
-
-            # Open file
-            df: pl.DataFrame = pl.read_parquet(file_path)
-
-            # Filter by date range
-            df = df.filter((pl.col("datetime") >= start) & (pl.col("datetime") <= end))
-
-            # Specify data types
-            df = df.with_columns(
-                pl.col("open"),
-                pl.col("high"),
-                pl.col("low"),
-                pl.col("close"),
-                pl.col("volume"),
-                pl.col("turnover"),
-                pl.col("open_interest"),
-                (pl.col("turnover") / pl.col("volume")).alias("vwap")
-            )
-
-            # Check for empty data
-            if df.is_empty():
-                continue
-
-            # Normalize prices
-            close_0: float = df.select(pl.col("close")).item(0, 0)
-
-            df = df.with_columns(
-                (pl.col("open") / close_0).alias("open"),
-                (pl.col("high") / close_0).alias("high"),
-                (pl.col("low") / close_0).alias("low"),
-                (pl.col("close") / close_0).alias("close"),
-            )
-
-            # Convert zeros to NaN for suspended trading days
-            numeric_columns: list = df.columns[1:]                              # Extract numeric columns
-
-            mask: pl.Series = df[numeric_columns].sum_horizontal() == 0         # Sum by row, if 0 then suspended
-
-            df = df.with_columns(                                               # Convert suspended day values to NaN
-                [pl.when(mask).then(float("nan")).otherwise(pl.col(col)).alias(col) for col in numeric_columns]
-            )
-
-            # Add symbol column
-            df = df.with_columns(pl.lit(vt_symbol).alias("vt_symbol"))
-
-            # Cache in list
-            dfs.append(df)
-
-        # Concatenate results
-        result_df: pl.DataFrame = pl.concat(dfs)
-        return result_df
+        return self.bar_repository.load_df(vt_symbols, interval, start, end, extended_days)
 
     def save_component_data(
         self,
@@ -248,12 +86,8 @@ class AlphaLab:
         index_components: dict[str, list[str]]
     ) -> None:
         """Save index component data"""
-        file_path: Path = self.component_path.joinpath(f"{index_symbol}")
+        self.component_repository.save(index_symbol, index_components)
 
-        with shelve.open(str(file_path)) as db:
-            db.update(index_components)
-
-    @lru_cache      # noqa
     def load_component_data(
         self,
         index_symbol: str,
@@ -261,22 +95,7 @@ class AlphaLab:
         end: datetime | str
     ) -> dict[datetime, list[str]]:
         """Load index component data as DataFrame"""
-        file_path: Path = self.component_path.joinpath(f"{index_symbol}")
-
-        start = to_datetime(start)
-        end = to_datetime(end)
-
-        with shelve.open(str(file_path)) as db:
-            keys: list[str] = list(db.keys())
-            keys.sort()
-
-            index_components: dict[datetime, list[str]] = {}
-            for key in keys:
-                dt: datetime = datetime.strptime(key, "%Y-%m-%d")
-                if start <= dt <= end:
-                    index_components[dt] = db[key]
-
-            return index_components
+        return self.component_repository.load(index_symbol, start, end)
 
     def load_component_symbols(
         self,
@@ -285,18 +104,7 @@ class AlphaLab:
         end: datetime | str
     ) -> list[str]:
         """Collect index component symbols"""
-        index_components: dict[datetime, list[str]] = self.load_component_data(
-            index_symbol,
-            start,
-            end
-        )
-
-        component_symbols: set[str] = set()
-
-        for vt_symbols in index_components.values():
-            component_symbols.update(vt_symbols)
-
-        return list(component_symbols)
+        return self.component_repository.symbols(index_symbol, start, end)
 
     def load_component_filters(
         self,
@@ -305,46 +113,7 @@ class AlphaLab:
         end: datetime | str
     ) -> dict[str, list[tuple[datetime, datetime]]]:
         """Collect index component duration filters"""
-        index_components: dict[datetime, list[str]] = self.load_component_data(
-            index_symbol,
-            start,
-            end
-        )
-
-        # Get all trading dates and sort
-        trading_dates: list[datetime] = sorted(index_components.keys())
-
-        # Initialize component duration dictionary
-        component_filters: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
-
-        # Get all component symbols
-        all_symbols: set[str] = set()
-        for vt_symbols in index_components.values():
-            all_symbols.update(vt_symbols)
-
-        # Iterate through each component to identify its duration in the index
-        for vt_symbol in all_symbols:
-            period_start: datetime | None = None
-            period_end: datetime | None = None
-
-            # Iterate through each trading day to identify continuous holding periods
-            for trading_date in trading_dates:
-                if vt_symbol in index_components[trading_date]:
-                    if period_start is None:
-                        period_start = trading_date
-
-                    period_end = trading_date
-                else:
-                    if period_start and period_end:
-                        component_filters[vt_symbol].append((period_start, period_end))
-                        period_start = None
-                        period_end = None
-
-            # Handle the last holding period
-            if period_start and period_end:
-                component_filters[vt_symbol].append((period_start, period_end))
-
-        return component_filters
+        return self.component_repository.filters(index_symbol, start, end)
 
     def add_contract_setting(
         self,
@@ -355,126 +124,56 @@ class AlphaLab:
         pricetick: float
     ) -> None:
         """Add contract information"""
-        contracts: dict = {}
-
-        if self.contract_path.exists():
-            with open(self.contract_path, encoding="UTF-8") as f:
-                contracts = json.load(f)
-
-        contracts[vt_symbol] = {
-            "long_rate": long_rate,
-            "short_rate": short_rate,
-            "size": size,
-            "pricetick": pricetick
-        }
-
-        with open(self.contract_path, mode="w+", encoding="UTF-8") as f:
-            json.dump(
-                contracts,
-                f,
-                indent=4,
-                ensure_ascii=False
-            )
+        self.contract_repository.add(vt_symbol, long_rate, short_rate, size, pricetick)
 
     def load_contract_setttings(self) -> dict:
         """Load contract settings"""
-        contracts: dict = {}
-
-        if self.contract_path.exists():
-            with open(self.contract_path, encoding="UTF-8") as f:
-                contracts = json.load(f)
-
-        return contracts
+        return self.contract_repository.load()
 
     def save_dataset(self, name: str, dataset: AlphaDataset) -> None:
         """Save dataset"""
-        file_path: Path = self.dataset_path.joinpath(f"{name}.pkl")
-
-        with open(file_path, mode="wb") as f:
-            pickle.dump(dataset, f)
+        self.dataset_store.save(name, dataset)
 
     def load_dataset(self, name: str) -> AlphaDataset | None:
         """Load dataset"""
-        file_path: Path = self.dataset_path.joinpath(f"{name}.pkl")
-        if not file_path.exists():
-            logger.error(f"Dataset file {name} does not exist")
-            return None
-
-        with open(file_path, mode="rb") as f:
-            dataset: AlphaDataset = pickle.load(f)
-            return dataset
+        return self.dataset_store.load(name)
 
     def remove_dataset(self, name: str) -> bool:
         """Remove dataset"""
-        file_path: Path = self.dataset_path.joinpath(f"{name}.pkl")
-        if not file_path.exists():
-            logger.error(f"Dataset file {name} does not exist")
-            return False
-
-        file_path.unlink()
-        return True
+        return self.dataset_store.remove(name)
 
     def list_all_datasets(self) -> list[str]:
         """List all datasets"""
-        return [file.stem for file in self.dataset_path.glob("*.pkl")]
+        return self.dataset_store.list_all()
 
     def save_model(self, name: str, model: AlphaModel) -> None:
         """Save model"""
-        file_path: Path = self.model_path.joinpath(f"{name}.pkl")
-
-        with open(file_path, mode="wb") as f:
-            pickle.dump(model, f)
+        self.model_store.save(name, model)
 
     def load_model(self, name: str) -> AlphaModel | None:
         """Load model"""
-        file_path: Path = self.model_path.joinpath(f"{name}.pkl")
-        if not file_path.exists():
-            logger.error(f"Model file {name} does not exist")
-            return None
-
-        with open(file_path, mode="rb") as f:
-            model: AlphaModel = pickle.load(f)
-            return model
+        return self.model_store.load(name)
 
     def remove_model(self, name: str) -> bool:
         """Remove model"""
-        file_path: Path = self.model_path.joinpath(f"{name}.pkl")
-        if not file_path.exists():
-            logger.error(f"Model file {name} does not exist")
-            return False
-
-        file_path.unlink()
-        return True
+        return self.model_store.remove(name)
 
     def list_all_models(self) -> list[str]:
         """List all models"""
-        return [file.stem for file in self.model_path.glob("*.pkl")]
+        return self.model_store.list_all()
 
     def save_signal(self, name: str, signal: pl.DataFrame) -> None:
         """Save signal"""
-        file_path: Path = self.signal_path.joinpath(f"{name}.parquet")
-
-        signal.write_parquet(file_path)
+        self.signal_store.save(name, signal)
 
     def load_signal(self, name: str) -> pl.DataFrame | None:
         """Load signal"""
-        file_path: Path = self.signal_path.joinpath(f"{name}.parquet")
-        if not file_path.exists():
-            logger.error(f"Signal file {name} does not exist")
-            return None
-
-        return pl.read_parquet(file_path)
+        return self.signal_store.load(name)
 
     def remove_signal(self, name: str) -> bool:
         """Remove signal"""
-        file_path: Path = self.signal_path.joinpath(f"{name}.parquet")
-        if not file_path.exists():
-            logger.error(f"Signal file {name} does not exist")
-            return False
-
-        file_path.unlink()
-        return True
+        return self.signal_store.remove(name)
 
     def list_all_signals(self) -> list[str]:
         """List all signals"""
-        return [file.stem for file in self.signal_path.glob("*.parquet")]
+        return self.signal_store.list_all()
