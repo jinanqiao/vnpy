@@ -1,0 +1,34 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+context: |
+  Tech stack: Python, Polars, vn.py-style trading objects, pytest.
+  Domain: quantitative research and backtesting system for A-share strategy development.
+  Current priorities:
+    - Improve backtest trustworthiness before adding strategy features.
+    - Keep data, universe, signal, portfolio, execution, metrics, and reporting boundaries explicit.
+    - Prefer small behavior-preserving refactors with regression tests over broad rewrites.
+    - Treat lookahead bias, survivorship bias, trading suspension, price limits, transaction costs, and reproducibility as first-class requirements.
+    - Avoid unsafe expression execution; use explicit allowlists or structured parsers for factor expressions.
+  Coding conventions:
+    - Follow existing Python style and keep public APIs stable unless the spec explicitly changes them.
+    - Use focused pytest coverage for calculation semantics and edge cases.
+    - Do not rely on local data files for unit tests; create compact deterministic fixtures.
+    - Keep generated research outputs outside core package code.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours

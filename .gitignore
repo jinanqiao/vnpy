@@ -41,3 +41,7 @@ _templates
 # Alpha
 lab/
 /.mypy_cache
+
+# Local data lake and backtest outputs (files exceed GitHub 100MB limit)
+/data/
+/outputs/
