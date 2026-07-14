@@ -7,7 +7,7 @@ import polars as pl
 import requests
 
 
-DEFAULT_ALIYUN_PUBLIC_IP: str = "47.93.170.141"
+DEFAULT_ALIYUN_PUBLIC_IP: str = "8.141.119.179"
 DEFAULT_ALIYUN_USERNAME: str = "Administrator"
 DEFAULT_ALIYUN_PASSWORD: str = "xulandong123A?"
 DEFAULT_QMT_GATEWAY_PORT: int = 8710

@@ -1,9 +1,38 @@
+import sys
+from pathlib import Path
+
 from vnpy.event import EventEngine
 
 from vnpy.trader.engine import MainEngine
 from vnpy.trader.ui import MainWindow, create_qapp
+from vnpy.trader.utility import load_json
 
-from vnpy_ctp import CtpGateway
+# vnpy_ctp 在 macOS arm64 上无法编译安装，缺失时跳过该接口
+try:
+    from vnpy_ctp import CtpGateway
+except ImportError:
+    CtpGateway = None
+
+# 远程 QMT 网关（HTTP 桥模式），实现位于 wd-vnpy 项目
+_WD_VNPY_ROOT = Path.home() / "code7" / "wd-vnpy"
+if _WD_VNPY_ROOT.exists() and str(_WD_VNPY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_WD_VNPY_ROOT))
+try:
+    from core.http_gateway import HttpGateway
+except ImportError as e:
+    print(f"未能加载 HTTP_QMT 网关: {e}")
+    HttpGateway = None
+
+# 交易所下拉框中英文并列显示（如 "SSE (上交所)"），不影响底层 vt_symbol 解析
+try:
+    from core.ui_patches import patch_exchange_combo_chinese
+    patch_exchange_combo_chinese()
+except ImportError as e:
+    print(f"未能加载交易所中文显示补丁: {e}")
+
+# 交易面板代码/名称输入框支持本地股票列表搜索下拉
+from stock_selector import patch_trading_widget_stock_completer
+patch_trading_widget_stock_completer()
 # from vnpy_ctptest import CtptestGateway
 # from vnpy_mini import MiniGateway
 # from vnpy_femas import FemasGateway
@@ -43,7 +72,10 @@ def main():
 
     main_engine = MainEngine(event_engine)
 
-    main_engine.add_gateway(CtpGateway)
+    if CtpGateway is not None:
+        main_engine.add_gateway(CtpGateway)
+    if HttpGateway is not None:
+        main_engine.add_gateway(HttpGateway)
     # main_engine.add_gateway(CtptestGateway)
     # main_engine.add_gateway(MiniGateway)
     # main_engine.add_gateway(FemasGateway)
@@ -78,6 +110,12 @@ def main():
 
     main_window = MainWindow(main_engine, event_engine)
     main_window.showMaximized()
+
+    # 启动后自动连接远程 QMT 桥（配置保存在 ~/.vntrader/connect_http_qmt.json）
+    if HttpGateway is not None:
+        setting: dict = load_json("connect_http_qmt.json")
+        if setting:
+            main_engine.connect(setting, "HTTP_QMT")
 
     qapp.exec()
 
