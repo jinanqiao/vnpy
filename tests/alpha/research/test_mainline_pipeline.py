@@ -107,7 +107,8 @@ def test_industry_map_keeps_only_gics1(tmp_path: Path) -> None:
 
 def test_missing_required_column_raises(tmp_path: Path) -> None:
     config = build_lake(tmp_path)
-    bars_path = tmp_path / "normalized" / "daily_bars_all_a.parquet"
+    # 改写加载器真正读取的规范路径（silver/daily_bars_raw_price.parquet）
+    bars_path = tmp_path / config.daily_bars_file
     pl.read_parquet(bars_path).drop("close").write_parquet(bars_path)
 
     with pytest.raises(ValueError, match="close"):
@@ -147,7 +148,8 @@ def test_rebalance_dates_weekly(tmp_path: Path) -> None:
 def test_suspect_ex_dividend_drop_logged(tmp_path: Path) -> None:
     """人为注入一根 -20% 的大阴线，应记进数据质量日志（R3）。"""
     config = build_lake(tmp_path)
-    bars_path = tmp_path / "normalized" / "daily_bars_all_a.parquet"
+    # 改写加载器真正读取的规范路径（silver/daily_bars_raw_price.parquet）
+    bars_path = tmp_path / config.daily_bars_file
     bars = pl.read_parquet(bars_path)
     crash_day = DATES[30]
     bars = bars.with_columns(

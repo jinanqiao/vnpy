@@ -152,12 +152,23 @@ def write_backtest_lake(
     benchmark: pl.DataFrame,
     trade_dates: list[date],
 ) -> Path:
-    """按数据湖目录结构写全部输入文件，返回 selection.parquet 的路径。"""
+    """按数据湖目录结构写全部输入文件，返回 selection.parquet 的路径。
+
+    同时写新旧两套布局：新布局（silver/gold）是当前生产入口读取的规范路径，
+    旧布局（normalized/benchmark/…）保留给仍直接按老路径读文件的历史测试。
+    行情文件（后复权/未复权）在加载器里没有旧→新回退，必须显式写到 silver/。
+    """
     (data_dir / "normalized").mkdir(parents=True)
     (data_dir / "benchmark").mkdir(parents=True)
     (data_dir / "universe").mkdir(parents=True)
     (data_dir / "calendar").mkdir(parents=True)
+    (data_dir / "silver").mkdir(parents=True)
 
+    # 新布局：生产入口默认读 silver/ 下的规范文件名
+    adjusted_bars.write_parquet(data_dir / "silver" / "daily_bars_adjusted.parquet")
+    unadjusted_bars.write_parquet(data_dir / "silver" / "daily_bars_raw_price.parquet")
+
+    # 旧布局：保留给按 normalized/ 老路径直接读文件的历史测试
     adjusted_bars.write_parquet(data_dir / "normalized" / "daily_bars_all_a_adjusted.parquet")
     unadjusted_bars.write_parquet(data_dir / "normalized" / "daily_bars_all_a.parquet")
     benchmark.write_parquet(data_dir / "benchmark" / "index_daily.parquet")

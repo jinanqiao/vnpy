@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -9,6 +10,34 @@ from typing import Any
 import requests
 
 from vnpy.alpha.research.qmt_gateway_data import QmtGatewayConfig
+
+
+# 实盘门锁：LIVE_TRADING_ENABLED 环境变量为 true/1/yes 才允许 place_order 生效。
+# 否则任何下单都会抛错。这是"半夜误跑脚本亏钱"的最后一道防线。
+def _live_trading_enabled() -> bool:
+    return str(os.environ.get("LIVE_TRADING_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+class LiveTradingDisabledError(RuntimeError):
+    """实盘门锁未打开，拒绝下单。"""
+
+
+def _extract_symbol(request: "QmtOrderRequest | dict[str, Any]") -> str:
+    """从 QmtOrderRequest 或 dict payload 抽出 symbol 供报错。"""
+    if hasattr(request, "symbol"):
+        return str(request.symbol)
+    if isinstance(request, dict):
+        return str(request.get("symbol") or request.get("vt_symbol") or "?")
+    return "?"
+
+
+def _guard_live_trading(caller: str) -> None:
+    if not _live_trading_enabled():
+        raise LiveTradingDisabledError(
+            f"实盘门锁未打开，拒绝执行 {caller}。"
+            f"若要真下单，请在 .env 或环境变量设 LIVE_TRADING_ENABLED=true。"
+            f"当前状态：因子未通过闸门/pre-trade 风控未上/无执行桥，禁止上实盘。"
+        )
 
 
 class QmtGatewayTradeError(RuntimeError):
@@ -38,8 +67,19 @@ class QmtOrderRequest:
 class QmtTradeGatewayClient:
     """Small adapter around the Windows-side QMT trading endpoints."""
 
-    def __init__(self, config: QmtGatewayConfig):
+    def __init__(
+        self,
+        config: QmtGatewayConfig,
+        pre_trade_check: "Any | None" = None,
+    ):
+        """pre_trade_check 是可选回调：Callable[[QmtOrderRequest | dict], PreTradeResult]。
+
+        None 时不做检查（供回测/单测/单纯查询等场景）。生产链路里应该注入一个
+        真实的 pre_trade 校验器（读 instrument_master / gateway_status / account 等）。
+        校验失败会抛 QmtGatewayTradeError，同时上游可以捕获 result.blocking 详情。
+        """
         self.config = config
+        self.pre_trade_check = pre_trade_check
 
     def health(self) -> dict[str, Any]:
         """Return gateway process health. This endpoint does not require auth."""
@@ -98,12 +138,31 @@ class QmtTradeGatewayClient:
         return list(self._request("GET", "/trades").get("trades") or [])
 
     def place_order(self, request: QmtOrderRequest | dict[str, Any]) -> dict[str, Any]:
+        _guard_live_trading("place_order")
+        self._run_pre_trade(request)
         payload = request.to_payload() if isinstance(request, QmtOrderRequest) else dict(request)
         return self._request("POST", "/orders", json=payload)
 
     def place_orders(self, orders: list[QmtOrderRequest | dict[str, Any]]) -> dict[str, Any]:
+        _guard_live_trading("place_orders")
+        for order in orders:
+            self._run_pre_trade(order)
         payload = [order.to_payload() if isinstance(order, QmtOrderRequest) else dict(order) for order in orders]
         return self._request("POST", "/orders/batch", json={"orders": payload})
+
+    def _run_pre_trade(self, request: QmtOrderRequest | dict[str, Any]) -> None:
+        """如果注入了 pre_trade_check 回调，执行并阻断违规订单。
+
+        pre_trade_check 是 Callable[[QmtOrderRequest | dict], PreTradeResult]。
+        result.is_blocked=True 时抛错，避免真下单。
+        """
+        if self.pre_trade_check is None:
+            return
+        result = self.pre_trade_check(request)
+        if result is not None and getattr(result, "is_blocked", False):
+            blocking = ",".join(result.blocking) if hasattr(result, "blocking") else str(result)
+            symbol = _extract_symbol(request)
+            raise QmtGatewayTradeError(f"pre-trade 风控拦截 {symbol}: {blocking}")
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         return self._request("POST", f"/orders/{order_id}/cancel")
@@ -148,6 +207,15 @@ class QmtTradeGatewayClient:
 
     def market_quotes(self, symbols: list[str]) -> dict[str, Any]:
         return self._request("POST", "/market/quotes", json={"symbols": symbols}).get("quotes") or {}
+
+    def market_bars(self, symbol: str, period: str = "1m", count: int = 240, adjust: str = "none") -> list[dict[str, Any]]:
+        return list(
+            self._request(
+                "GET",
+                f"/market/bars/{symbol}",
+                params={"period": period, "count": int(count), "adjust": adjust},
+            ).get("bars") or []
+        )
 
     def market_subscribe(self, symbols: list[str], period: str = "1m") -> dict[str, Any]:
         return self._request("POST", "/market/subscribe", json={"symbols": symbols, "period": period})

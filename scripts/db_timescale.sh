@@ -47,7 +47,7 @@ case "${1:-up}" in
       psql -U "${POSTGRES_USER:-vnpy}" -d "${POSTGRES_DB:-vnpy_quant}" \
       -v ON_ERROR_STOP=1 \
       -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('timescaledb', 'pgcrypto') ORDER BY extname;" \
-      -c "SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN ('ops', 'live', 'risk') ORDER BY schemaname, tablename;"
+      -c "SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN ('market', 'ops', 'live', 'risk') ORDER BY schemaname, tablename;"
     ;;
   *)
     echo "用法: $0 {up|down|logs|psql|check}" >&2

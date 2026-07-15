@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+import json
 
 import polars as pl
 
@@ -77,15 +78,62 @@ def write_data_lake(
     execution_universe: pl.DataFrame,
     trade_dates: list[date],
 ) -> None:
-    """把合成数据按数据湖的目录结构写成 parquet，供流水线端到端测试。"""
+    """把合成数据按数据湖的目录结构写成 parquet，供流水线端到端测试。
+
+    同时写新旧两套布局：新布局（silver/gold）是当前生产入口默认读取的规范路径，
+    旧布局（normalized/sector/…）保留给仍直接按老路径读文件的历史测试。
+    未复权行情在加载器里没有旧→新回退，必须显式写到 silver/。
+    最后落一份最小 manifest，供 data_gate_mode 非空的入口做版本校验。
+    """
     (data_dir / "normalized").mkdir(parents=True)
     (data_dir / "sector").mkdir(parents=True)
     (data_dir / "universe").mkdir(parents=True)
     (data_dir / "calendar").mkdir(parents=True)
+    (data_dir / "silver").mkdir(parents=True)
+    (data_dir / "gold").mkdir(parents=True)
 
+    calendar = pl.DataFrame({"market": ["SH"] * len(trade_dates), "trade_date": trade_dates})
+
+    # 旧布局：保留给按 normalized/sector/calendar 老路径直接读文件的历史测试
     bars.write_parquet(data_dir / "normalized" / "daily_bars_all_a.parquet")
     sector_members.write_parquet(data_dir / "sector" / "sector_members.parquet")
     execution_universe.write_parquet(data_dir / "universe" / "execution_universe.parquet")
-    pl.DataFrame(
-        {"market": ["SH"] * len(trade_dates), "trade_date": trade_dates}
-    ).write_parquet(data_dir / "calendar" / "trading_dates.parquet")
+    calendar.write_parquet(data_dir / "calendar" / "trading_dates.parquet")
+
+    # 新布局：生产入口默认读 silver/gold 下的规范文件名
+    bars.write_parquet(data_dir / "silver" / "daily_bars_raw_price.parquet")
+    bars.write_parquet(data_dir / "silver" / "daily_bars_adjusted.parquet")
+    sector_members.write_parquet(data_dir / "silver" / "sector_members_snapshot.parquet")
+    calendar.write_parquet(data_dir / "silver" / "trading_calendar.parquet")
+    execution_universe.write_parquet(data_dir / "gold" / "execution_universe.parquet")
+
+    _write_minimal_manifest(data_dir, trade_dates)
+
+
+def _write_minimal_manifest(data_dir: Path, trade_dates: list[date]) -> None:
+    """写一份仅够 DataContext 版本校验通过的最小 manifest。
+
+    只登记 4 张核心数据集（DataContext.CORE_DATASETS）并指向 silver/gold 路径；
+    不算真实 sha256（默认入口 verify_hash=False，不会校验哈希）。
+    辅助数据故意不登记，好让 data_gate 在 backtest/paper/live 模式下如实报缺失。
+    """
+    latest = str(max(trade_dates)) if trade_dates else None
+    core = {
+        "daily_bars_raw_price": "silver/daily_bars_raw_price.parquet",
+        "daily_bars_adjusted": "silver/daily_bars_adjusted.parquet",
+        "trading_calendar": "silver/trading_calendar.parquet",
+        "execution_universe": "gold/execution_universe.parquet",
+    }
+    manifest = {
+        "version_id": "test-fixture-0001",
+        "latest_trade_date": latest,
+        "datasets": [
+            {"name": name, "path": path, "sha256": "", "layer": "silver"}
+            for name, path in core.items()
+        ],
+    }
+    manifest_dir = data_dir / "manifest"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "data_foundation_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )

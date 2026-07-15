@@ -8,6 +8,7 @@ import hashlib
 import json
 
 from .data_gate import DataGateMode, DataGateResult, run_data_gate
+from .live_gate import LiveGateError, ReconciliationFetcher, check_live_reconciliation_gate
 
 
 class DataContextError(RuntimeError):
@@ -101,13 +102,37 @@ def validate_data_context(
     as_of: date | str | None = None,
     manifest_path: str | Path | None = None,
     verify_hash: bool = False,
+    strategy_name: str | None = None,
+    reconciliation_fetcher: ReconciliationFetcher | None = None,
+    require_reconciliation: bool = False,
 ) -> tuple[DataContext, DataGateResult]:
-    """读取 manifest 并运行数据门禁；失败时直接抛错阻断实盘入口。"""
+    """读取 manifest + 运行数据门禁 + 检查盘后对账闸门（可选）。任何一步失败都抛错阻断。
+
+    盘后对账闸门（次日实盘阻断）为**默认关闭**：只有 mode ∈ {paper, live}、且
+    调用方显式传入 strategy_name + reconciliation_fetcher 时才启用。这样研究/回测
+    路径完全不受影响，实盘入口需要显式挂钩。
+
+    require_reconciliation=True 表示"没找到对账记录也阻断"（严格准入模式）。
+    """
     context = load_data_context(data_root, manifest_path=manifest_path, verify_hash=verify_hash)
     gate = run_data_gate(data_root, mode=mode, as_of=as_of)
     if gate.status == "fail":
         failures = "; ".join(f"{item.dataset}/{item.name}: {item.detail}" for item in gate.blocking_checks)
         raise DataContextError(f"数据门禁失败，已阻断运行: {failures}")
+
+    # 盘后对账闸门：只在 paper/live 且调用方接入 fetcher 时生效
+    if strategy_name and reconciliation_fetcher is not None:
+        mode_enum = DataGateMode(mode) if not isinstance(mode, DataGateMode) else mode
+        if mode_enum in {DataGateMode.PAPER, DataGateMode.LIVE}:
+            try:
+                check_live_reconciliation_gate(
+                    strategy_name,
+                    fetcher=reconciliation_fetcher,
+                    allow_missing=not require_reconciliation,
+                )
+            except LiveGateError as exc:
+                raise DataContextError(str(exc)) from exc
+
     return context, gate
 
 

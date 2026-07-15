@@ -188,7 +188,7 @@ def run_data_gate(
             ))
         for dataset in ["instrument_master_snapshot", "sector_members_snapshot", "sw1_members_snapshot"]:
             if dataset in frames:
-                checks.append(_snapshot_age_check(dataset, frames[dataset], as_of_date, mode, snapshot_max_age_days))
+                checks.append(_snapshot_age_check(dataset, frames[dataset], max(as_of_date, date.today()), mode, snapshot_max_age_days))
         if "financial_reports_pit" in frames:
             checks.extend(_financial_report_checks(frames["financial_reports_pit"], mode))
 

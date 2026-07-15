@@ -1,5 +1,24 @@
 # 项目约定（主线策略研究，vnpy/alpha/research/mainline*）
 
+## ⚠️ 实盘准入警告（2026-07-15 定）
+
+**当前不允许上实盘。** 关键缺陷：
+
+1. **因子层未过闸门**：三个生产因子（rs_60/nh_252/vol_ratio）零个通过 IC 显著 + 分层单调
+   双重检验；`outputs/factor_checks/stock_factors_gics1.md` 自己写"过去正贡献几乎全部
+   来自大盘择时与无信号清仓，而非选股"。
+2. **实盘 pre-trade 风控几乎为空**：place_order 前不查涨跌停、停牌、ST、单股仓位、单日
+   损失。回测里 `check_buy_blocked/check_sell_blocked` 逻辑完整，但未搬到实盘链路。
+3. **执行桥完全缺失**：`live.signals` / `live.target_positions` 表建好了但无写入代码；
+   没有 `selection.parquet → orders` 转换脚本。
+4. **参数同一段样本反复调**：spec-009 自己警告"过拟合风险在累积"。
+
+**保险丝**：`qmt_gateway_trade.place_order` 前置门锁 `LIVE_TRADING_ENABLED`；默认
+未设 → 抛 `LiveTradingDisabledError` 拒单。真要上盘先跑完 optimization_plan_v1.md
+的 Phase 1~3（含 60 天纸盘验证）。
+
+---
+
 本仓库在 vnpy 框架上做 A 股量化策略研究。当前活跃工作全部围绕
 `vnpy/alpha/research/mainline`（选股信号）和 `mainline_backtest`（回测引擎）。
 用户是 Python 初学者，代码必须保持初学者可读。

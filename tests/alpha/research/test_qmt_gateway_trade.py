@@ -6,6 +6,7 @@ import pytest
 
 from vnpy.alpha.research.qmt_gateway_data import QmtGatewayConfig
 from vnpy.alpha.research.qmt_gateway_trade import (
+    LiveTradingDisabledError,
     QmtGatewayTradeError,
     QmtOrderRequest,
     QmtTradeGatewayClient,
@@ -31,6 +32,8 @@ def test_place_order_sends_token_and_payload(monkeypatch: pytest.MonkeyPatch) ->
         return FakeResponse({"dry_run": True, "order_id": "DRY_1"})
 
     monkeypatch.setattr("vnpy.alpha.research.qmt_gateway_trade.requests.request", fake_request)
+    # 打开实盘门锁——否则 place_order 会被 LiveTradingDisabledError 挡下
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
 
     client = QmtTradeGatewayClient(QmtGatewayConfig(base_url="http://127.0.0.1:8710", token="secret"))
     result = client.place_order(QmtOrderRequest(symbol="600000.SH", side="buy", quantity=100, price=10.5))
@@ -135,3 +138,88 @@ def test_gateway_http_error_is_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(QmtGatewayTradeError, match="unauthorized"):
         client.account()
+
+
+# ---------------------------------------------------------- 实盘门锁 LIVE_TRADING_ENABLED
+
+
+def test_place_order_blocked_when_live_trading_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认状态下 LIVE_TRADING_ENABLED 未设，place_order 必须被门锁拒绝。"""
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+    client = QmtTradeGatewayClient(QmtGatewayConfig(base_url="http://127.0.0.1:8710", token="t"))
+    with pytest.raises(LiveTradingDisabledError, match="实盘门锁未打开"):
+        client.place_order(QmtOrderRequest(symbol="000001.SZ", side="buy", quantity=100, price=10.0))
+
+
+def test_place_orders_blocked_when_live_trading_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+    client = QmtTradeGatewayClient(QmtGatewayConfig(base_url="http://127.0.0.1:8710", token="t"))
+    with pytest.raises(LiveTradingDisabledError):
+        client.place_orders([QmtOrderRequest(symbol="000001.SZ", side="buy", quantity=100, price=10.0)])
+
+
+def test_place_order_blocked_when_flag_is_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LIVE_TRADING_ENABLED=false（或 0/no/空）也算未打开。"""
+    for value in ["false", "0", "no", "", "  "]:
+        monkeypatch.setenv("LIVE_TRADING_ENABLED", value)
+        client = QmtTradeGatewayClient(QmtGatewayConfig(base_url="http://127.0.0.1:8710", token="t"))
+        with pytest.raises(LiveTradingDisabledError):
+            client.place_order(QmtOrderRequest(symbol="000001.SZ", side="buy", quantity=100, price=10.0))
+
+
+def test_place_order_pre_trade_check_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gateway 的 pre_trade_check 回调触发 → 抛错阻单，不到达 HTTP 层。"""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    http_hit = []
+    monkeypatch.setattr(
+        "vnpy.alpha.research.qmt_gateway_trade.requests.request",
+        lambda *a, **k: http_hit.append(1) or FakeResponse({"ok": True}),
+    )
+
+    class FakeResult:
+        is_blocked = True
+        blocking = ("st",)
+
+    def fake_check(_req: Any) -> Any:
+        return FakeResult()
+
+    client = QmtTradeGatewayClient(
+        QmtGatewayConfig(base_url="http://127.0.0.1:8710", token="t"),
+        pre_trade_check=fake_check,
+    )
+    with pytest.raises(QmtGatewayTradeError, match="pre-trade 风控拦截"):
+        client.place_order(QmtOrderRequest(symbol="000001.SZ", side="buy", quantity=100, price=10.0))
+    assert http_hit == []  # 没有真发 HTTP
+
+
+def test_place_order_pre_trade_check_pass_then_places(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pre-trade 通过 → 正常发到 HTTP。"""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setattr(
+        "vnpy.alpha.research.qmt_gateway_trade.requests.request",
+        lambda *a, **k: FakeResponse({"order_id": "OK1"}),
+    )
+
+    class FakeResult:
+        is_blocked = False
+        blocking = ()
+
+    client = QmtTradeGatewayClient(
+        QmtGatewayConfig(base_url="http://127.0.0.1:8710", token="t"),
+        pre_trade_check=lambda _r: FakeResult(),
+    )
+    result = client.place_order(QmtOrderRequest(symbol="000001.SZ", side="buy", quantity=100, price=10.0))
+    assert result["order_id"] == "OK1"
+
+
+def test_place_order_allowed_when_flag_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LIVE_TRADING_ENABLED=true 时门锁放行（下游是否成功交给 QMT）。"""
+    def fake_request(method: str, url: str, **kwargs: Any) -> FakeResponse:
+        return FakeResponse({"order_id": "OK1"})
+
+    monkeypatch.setattr("vnpy.alpha.research.qmt_gateway_trade.requests.request", fake_request)
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    client = QmtTradeGatewayClient(QmtGatewayConfig(base_url="http://127.0.0.1:8710", token="t"))
+    result = client.place_order(QmtOrderRequest(symbol="000001.SZ", side="buy", quantity=100, price=10.0))
+    assert result["order_id"] == "OK1"
