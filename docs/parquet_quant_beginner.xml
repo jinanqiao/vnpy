@@ -1,0 +1,368 @@
+<title>Parquet 是什么：给量化回测初学者的存储说明</title>
+
+<h1>阅读导航</h1>
+
+<p><b>这篇文档解决的问题</b>：你现在的量化项目里有很多 <code>.parquet</code> 文件，比如 <code>data/normalized/daily_bars_all_a_adjusted.parquet</code>。这篇文档会解释 Parquet 到底是什么、为什么它适合量化日频数据、它和 CSV / 数据库有什么区别，以及你当前项目要不要换新的存储框架。</p>
+
+<p>默认读者是量化零基础。你不需要先懂数据库，也不需要先懂分布式计算。可以先把 Parquet 理解成一种“专门为大表格准备的压缩文件格式”：它像 Excel 一样存表格，但比 Excel 更适合程序批量读取；它像 CSV 一样是文件，但比 CSV 更省空间、读得更快、还能记住每一列的数据类型。</p>
+
+<callout emoji="💡" background-color="light-yellow" border-color="yellow">
+  <p><b>先记住一句话</b>：CSV 像把表格逐行写在纸上，Parquet 像把每一列分别装进压缩抽屉。量化回测经常只看少数几列，比如日期、股票代码、收盘价、成交额，所以 Parquet 会很合适。</p>
+</callout>
+
+<h1>1. Parquet 的一句话直觉</h1>
+
+<p><b>这章解决的问题</b>：先建立方向感，知道 Parquet 在量化项目里扮演什么角色。</p>
+
+<p>Parquet（Apache Parquet，一种列式存储文件格式——把表格按“列”组织并压缩保存，方便程序快速读取大数据表）不是一个数据库，也不是一个回测框架。它只是一个文件格式，通常以 <code>.parquet</code> 结尾。</p>
+
+<p>生活里可以这样类比：CSV 像一本流水账，每一行写一笔完整记录；Parquet 像一个分类文件柜，日期放一个抽屉，股票代码放一个抽屉，收盘价放一个抽屉，成交额放一个抽屉。你只想查“收盘价”时，Parquet 可以少翻很多东西。</p>
+
+<table>
+  <thead><tr><th background-color="light-gray">场景</th><th background-color="light-gray">CSV 的感觉</th><th background-color="light-gray">Parquet 的感觉</th></tr></thead>
+  <tbody>
+    <tr><td>小表格人工查看</td><td>方便，用文本编辑器就能看</td><td>不方便，需要程序或工具打开</td></tr>
+    <tr><td>上千万行行情</td><td>体积大，读取慢</td><td>体积小，读取快</td></tr>
+    <tr><td>只读几列</td><td>通常要扫完整行</td><td>可以只读需要的列</td></tr>
+    <tr><td>保存数据类型</td><td>容易把日期、数字读错</td><td>文件里保存列类型</td></tr>
+  </tbody>
+</table>
+
+<p>放到你的项目里，Parquet 的角色就是“本地数据湖”的基础砖块。数据湖（Data Lake，数据湖——把多类原始数据和加工数据集中存放的地方）在这里不是一个很玄的概念，它就是 <code>/Users/xulandong/code8/vnpy/data</code> 下面的一组行情、股票池、行业、财务数据文件。</p>
+
+<p><b>这章你需要记住的一件事</b>：Parquet 不是策略，不负责赚钱；它只是让大规模表格数据更容易被程序稳定读取。</p>
+
+<h1>2. 为什么量化数据适合 Parquet</h1>
+
+<p><b>这章解决的问题</b>：解释为什么日频行情、因子表、股票池这类数据，天然适合按 Parquet 保存。</p>
+
+<p>量化回测常见的数据长得很像一张超大的表。比如日频行情通常有这些列：交易日期、股票代码、开盘价、最高价、最低价、收盘价、成交量、成交额。每天几千只股票，几年下来就是几百万行；二十年下来就是上千万行。</p>
+
+<p>你的项目里就有一个很典型的例子：<code>data/normalized/daily_bars_all_a_adjusted.parquet</code>，它是后复权全 A 日线，约 1477 万行、5203 只股票，日期从 2005-11-30 到 2026-07-08。后复权（Backward Adjusted Price，后复权价格——把历史价格按之后的分红送转等事件调整，让收益率计算更连续）常用于计算历史涨跌幅和策略收益。</p>
+
+<p>如果用 CSV 存这张表，程序读数据时经常要把整份文本逐行解析一遍。解析（Parsing，把文本转换成程序能理解的数据结构）这件事很慢，而且每次都要重新判断“这一列到底是日期、字符串还是小数”。Parquet 则会把列类型写进文件，并用更紧凑的二进制方式保存。</p>
+
+<whiteboard type="mermaid">
+flowchart TD
+    A["日频行情原始数据"] --> B["清洗字段和日期"]
+    B --> C["保存为 Parquet 文件"]
+    C --> D["因子计算只读 close 和 turnover"]
+    C --> E["回测读取 open high low close"]
+    C --> F["股票池过滤读取 vt_symbol 和 datetime"]
+</whiteboard>
+
+<p>这个图要表达的不是技术炫技，而是一个简单事实：同一份 Parquet 行情，可以被很多环节复用。因子计算可能只读 <code>close</code> 和 <code>turnover</code>；回测成交可能要读 <code>open</code>、<code>high</code>、<code>low</code>、<code>close</code>；股票池过滤可能只需要 <code>datetime</code> 和 <code>vt_symbol</code>。列式存储（Columnar Storage，列式存储——同一列的数据连续放在一起，而不是整行整行放）正好适合这种用法。</p>
+
+<p><b>这章你需要记住的一件事</b>：量化研究经常“从大表里取少数几列”，Parquet 的列式存储正好对口。</p>
+
+<h1>3. 行式存储和列式存储有什么区别</h1>
+
+<p><b>这章解决的问题</b>：用一个小表手工看懂 Parquet 为什么读列快。</p>
+
+<p>行式存储（Row-oriented Storage，行式存储——一条记录的所有字段放在一起）更像普通流水账。列式存储则把同一列放在一起。假设有 3 天、2 只股票的简化行情：</p>
+
+<table>
+  <thead><tr><th background-color="light-gray">datetime</th><th background-color="light-gray">vt_symbol</th><th background-color="light-gray">close</th><th background-color="light-gray">turnover</th></tr></thead>
+  <tbody>
+    <tr><td>2026-07-01</td><td>000001.SZ</td><td>10.00</td><td>1000000</td></tr>
+    <tr><td>2026-07-01</td><td>000002.SZ</td><td>20.00</td><td>2000000</td></tr>
+    <tr><td>2026-07-02</td><td>000001.SZ</td><td>10.20</td><td>1200000</td></tr>
+    <tr><td>2026-07-02</td><td>000002.SZ</td><td>19.80</td><td>1800000</td></tr>
+  </tbody>
+</table>
+
+<p>如果你的策略只想算收盘价涨跌幅，其实只需要 <code>datetime</code>、<code>vt_symbol</code>、<code>close</code> 三列。CSV 通常会把每行完整读出来，再丢掉暂时不用的 <code>turnover</code>。Parquet 可以更直接地只读相关列。</p>
+
+<p>用公式表达，某只股票第 t 天的日收益率（Daily Return，日收益率——今天收盘价相对昨天收盘价的涨跌比例）可以写成：</p>
+
+<p><latex>r_t = \frac{P_t}{P_{t-1}} - 1</latex></p>
+
+<p><b>读作</b>：第 t 天收益率等于今天价格除以昨天价格，再减 1。这里的 <latex>P_t</latex>（读作 P t，第 t 天价格）只需要收盘价这一列。</p>
+
+<p>代入一个小例子：000001.SZ 在 2026-07-01 的收盘价是 10.00，2026-07-02 的收盘价是 10.20，那么 <latex>r_t = 10.20 / 10.00 - 1 = 0.02</latex>，也就是 2%。这一步根本用不到开盘价、成交额、行业分类。</p>
+
+<p><b>这章你需要记住的一件事</b>：当你的计算只依赖少数几列时，列式存储能少读很多无关数据。</p>
+
+<h1>4. Parquet 和 CSV、Excel、数据库的区别</h1>
+
+<p><b>这章解决的问题</b>：你到底该把 Parquet 放在工具箱里的哪个位置。</p>
+
+<p>CSV（Comma-Separated Values，逗号分隔值——用逗号把表格每一列隔开的纯文本文件）适合交换小数据、人工检查和临时导出。Excel 适合人工录入、展示和少量计算。数据库（Database，用结构化方式管理数据的软件系统）适合多人并发读写、权限控制、复杂事务和长期服务化查询。Parquet 则适合程序批量读取大表，尤其适合分析型任务。</p>
+
+<table>
+  <thead><tr><th background-color="light-gray">工具</th><th background-color="light-gray">最适合什么</th><th background-color="light-gray">不适合什么</th><th background-color="light-gray">量化里的典型用法</th></tr></thead>
+  <tbody>
+    <tr><td>CSV</td><td>小文件交换、人工查看</td><td>千万行级别长期存储</td><td>导出一小段回测结果给别人看</td></tr>
+    <tr><td>Excel</td><td>手工整理、报表展示</td><td>自动化大规模回测</td><td>展示月度收益表</td></tr>
+    <tr><td>Parquet</td><td>批量分析、大表读取、列筛选</td><td>频繁逐条更新、多人事务</td><td>保存日线行情、因子、股票池</td></tr>
+    <tr><td>SQLite</td><td>轻量级本地数据库</td><td>超大分析表的列扫描</td><td>保存配置、小型交易记录</td></tr>
+    <tr><td>DuckDB</td><td>直接查询 Parquet 的本地分析数据库</td><td>线上高并发服务</td><td>用 SQL 查行情和因子文件</td></tr>
+    <tr><td>PostgreSQL / MySQL</td><td>业务系统、多用户读写</td><td>纯本地研究的简单文件流</td><td>交易系统、账户、任务状态</td></tr>
+  </tbody>
+</table>
+
+<p>事务（Transaction，事务——一组操作要么全部成功、要么全部失败）是数据库很重要的能力。比如你在真实交易系统里同时写订单、成交、持仓，如果只写了一半就断电，会非常危险。Parquet 不擅长这种逐条事务写入，它更像“写好一批数据，之后反复读取”。</p>
+
+<p>所以别把 Parquet 当万能工具。它适合你的研究数据层，不一定适合实盘交易系统的订单管理层。研究和实盘是两种不同场景：研究更像图书馆查资料，实盘更像柜台办业务。图书馆需要快查大量资料，柜台需要每一笔业务都有确认和回滚。</p>
+
+<p><b>这章你需要记住的一件事</b>：Parquet 是分析型文件格式，不是替代所有数据库的银弹。</p>
+
+<h1>5. 你当前项目里的 Parquet 数据在哪里</h1>
+
+<p><b>这章解决的问题</b>：把抽象概念落到你的项目，知道哪些文件最重要。</p>
+
+<p>你当前项目根目录是 <code>/Users/xulandong/code8/vnpy</code>，主要数据在 <code>data</code> 目录下。这个目录整体约 2.4G，主要由 Parquet 文件组成。下面这些文件是日频量化研究里最关键的几类。</p>
+
+<table>
+  <thead><tr><th background-color="light-gray">类别</th><th background-color="light-gray">路径</th><th background-color="light-gray">用途</th><th background-color="light-gray">我盘点到的规模</th></tr></thead>
+  <tbody>
+    <tr><td>后复权全 A 日线</td><td><code>data/normalized/daily_bars_all_a_adjusted.parquet</code></td><td>算收益、动量、回撤</td><td>1477 万行，5203 只，2005-11-30 到 2026-07-08</td></tr>
+    <tr><td>未复权全 A 日线</td><td><code>data/normalized/daily_bars_all_a.parquet</code></td><td>算下单股数、整手交易</td><td>606 万行，5206 只，2021-03-05 到 2026-07-02</td></tr>
+    <tr><td>可执行股票池</td><td><code>data/universe/execution_universe.parquet</code></td><td>过滤停牌、上市不足等不可交易样本</td><td>556 万行，4609 只，2021-03-05 到 2026-07-02</td></tr>
+    <tr><td>基准指数</td><td><code>data/benchmark/index_daily.parquet</code></td><td>和沪深 300 等基准比较</td><td>6250 行，2021-05-07 到 2026-07-02</td></tr>
+    <tr><td>行业分类</td><td><code>data/sector/sector_members.parquet</code> / <code>data/sector/sw1_members.parquet</code></td><td>行业约束、行业暴露分析</td><td>当前快照，不是严格历史 PIT</td></tr>
+    <tr><td>财务数据</td><td><code>data/akshare/financial_reports.parquet</code></td><td>基本面研究</td><td>91.8 万行，5206 只</td></tr>
+  </tbody>
+</table>
+
+<p>PIT（Point-in-Time，时点正确数据——在某个历史日期只能使用当时已经知道的信息）是量化回测里非常关键的概念。比如 2021 年做回测时，不能使用 2026 年才知道的行业分类或股票状态。你的项目里行情本身很丰富，但部分辅助表目前还是当前快照，这一点会影响严谨性。</p>
+
+<p><b>这章你需要记住的一件事</b>：你不是“没有数据”，而是已经有一套本地 Parquet 数据湖；下一阶段要补的是数据质量和 PIT 完整性。</p>
+
+<h1>6. 用 Python 读取 Parquet 的最小例子</h1>
+
+<p><b>这章解决的问题</b>：让你知道代码里怎么打开 Parquet，不停留在概念层。</p>
+
+<p>在 Python 里，常用 pandas 或 polars 读取 Parquet。pandas（Python Data Analysis Library，Python 数据分析库——最常见的表格数据处理工具）更适合入门；polars（一个高性能 DataFrame 库——处理大表时通常更快）更适合你当前这种上千万行数据。</p>
+
+<pre lang="python" caption="用 pandas 读取一个小型 Parquet 文件"><code>import pandas as pd
+
+path = "data/benchmark/index_daily.parquet"
+# 金融含义：读取基准指数日线，用来和策略净值比较。
+df = pd.read_parquet(path, columns=["datetime", "index_symbol", "close"])
+# 金融含义：只读日期、指数代码、收盘价，避免把暂时不用的成交量也读进来。
+
+print(df.head())
+# 金融含义：先看前几行，确认日期、指数代码、价格没有读错。</code></pre>
+
+<p>如果用 polars，可以写成：</p>
+
+<pre lang="python" caption="用 polars 只读取需要的列"><code>import polars as pl
+
+path = "data/normalized/daily_bars_all_a_adjusted.parquet"
+# 金融含义：这是后复权全 A 日线，适合计算收益率。
+
+bars = pl.read_parquet(
+    path,
+    columns=["datetime", "vt_symbol", "close"]
+)
+# 金融含义：只读取日期、股票代码、收盘价，先不读取 open/high/low/turnover。
+
+print(bars.head())
+# 金融含义：确认每一行是一只股票在某一天的收盘价。</code></pre>
+
+<p>上面代码里最重要的细节是 <code>columns=[...]</code>。这不是语法小聪明，而是量化数据工程里的基本习惯：只读你当前研究需要的列。你查 1477 万行行情时，如果只是算收盘价动量，就没必要把所有列都读进内存。</p>
+
+<p><b>这章你需要记住的一件事</b>：读取 Parquet 时优先指定列，先小范围验证，再扩大计算。</p>
+
+<h1>7. Parquet 为什么比 CSV 省空间</h1>
+
+<p><b>这章解决的问题</b>：解释压缩为什么在量化行情里特别有效。</p>
+
+<p>量化行情有一个特点：同一列的数据类型高度一致，而且重复模式很多。比如 <code>vt_symbol</code> 一列反复出现同一批股票代码，<code>datetime</code> 一列反复出现交易日，价格列全是小数，成交量列全是数字。Parquet 可以利用这些规律压缩。</p>
+
+<p>压缩（Compression，把数据用更少空间表示）可以用一个生活例子理解：如果你要写 100 次“000001.SZ”，最笨的方式是完整写 100 遍；聪明一点可以写“000001.SZ 重复 100 次”。真实压缩算法更复杂，但直觉类似：发现重复和规律，然后少写废话。</p>
+
+<p>举一个很小的数字例子。假设某列有 10 个行业名称：</p>
+
+<pre lang="text" caption="重复值示例"><code>银行, 银行, 银行, 证券, 证券, 医药, 医药, 医药, 医药, 电力</code></pre>
+
+<p>更紧凑的表达可以接近这样：</p>
+
+<pre lang="text" caption="更紧凑的表达思路"><code>银行 x 3
+证券 x 2
+医药 x 4
+电力 x 1</code></pre>
+
+<p>这只是帮助理解的简化版，不代表 Parquet 内部只用这一种压缩方式。真实 Parquet 会结合编码（Encoding，把数据转换成更适合保存的表示方式）和压缩算法，例如字典编码、运行长度编码、Snappy、ZSTD 等。</p>
+
+<p><b>这章你需要记住的一件事</b>：行情表的列很规整、重复多，所以 Parquet 往往能压得更小、读得更快。</p>
+
+<h1>8. Parquet 的常见坑</h1>
+
+<p><b>这章解决的问题</b>：知道初学者最容易误解和踩坑的地方。</p>
+
+<p><b>第一，Parquet 不方便肉眼直接看。</b> CSV 可以用文本编辑器打开，Parquet 通常需要 Python、DuckDB、Polars、Pandas 或专门工具查看。这不是缺陷，而是取舍：它牺牲一点人工可读性，换来程序读取效率。</p>
+
+<p><b>第二，Parquet 文件通常不适合一行一行频繁追加。</b> 如果你每来一笔 tick 就写一次文件，Parquet 会很别扭。更常见的做法是攒一批数据后批量写入，或者按日期、品种分区保存。</p>
+
+<p><b>第三，字段口径比文件格式更重要。</b> 同样叫 <code>close</code>，它可能是未复权收盘价，也可能是后复权收盘价。回测收益通常用后复权更顺手；真实下单股数则要回到未复权价格。你当前项目也把这两类分开保存，这是对的。</p>
+
+<p><b>第四，Parquet 不会自动解决未来函数。</b> 未来函数（Lookahead Bias，偷看未来数据——在历史回测中用了当时还不知道的信息）是策略逻辑问题，不是文件格式问题。把有未来函数的数据存成 Parquet，未来函数仍然存在。</p>
+
+<p>错误示例：在 2021 年的回测里直接使用 2026 年整理好的当前行业成分，可能会让策略“知道未来哪些公司属于哪个行业”。正确做法是使用历史时点行业分类，或者在报告里明确声明这是当前快照，只能做粗略研究。</p>
+
+<p><b>这章你需要记住的一件事</b>：Parquet 能提高数据读取效率，但不能替你保证数据口径正确。</p>
+
+<h1>9. 当前项目要不要引入新的存储框架</h1>
+
+<p><b>这章解决的问题</b>：回答你前面问的“是不是需要引入新的框架存储下”。</p>
+
+<p>以你当前项目的规模看，暂时不需要为了日频研究把存储整体迁到复杂数据库。现在 <code>data</code> 目录约 2.4G，主表是 Parquet，代码侧已经用 polars 直接读取。这个组合对于日频量价回测、因子检验、股票池过滤是合适的。</p>
+
+<p>更实际的升级路线不是“马上换数据库”，而是分三层看：</p>
+
+<whiteboard type="mermaid">
+flowchart TD
+    A["当前阶段：Parquet 文件数据湖"] --> B["加数据字典和质量检查"]
+    B --> C["需要复杂查询时：加 DuckDB 查询层"]
+    C --> D["多人系统或实盘状态：再引入 PostgreSQL 等数据库"]
+    B --> E["优先补 PIT 数据源：历史 ST 行业成分停复牌复权因子"]
+</whiteboard>
+
+<table>
+  <thead><tr><th background-color="light-gray">阶段</th><th background-color="light-gray">建议</th><th background-color="light-gray">原因</th></tr></thead>
+  <tbody>
+    <tr><td>现在</td><td>继续用 Parquet + Polars</td><td>数据量不大到必须上复杂系统，现有代码也已经适配</td></tr>
+    <tr><td>近期</td><td>补数据字典、质量报告、更新日志</td><td>比换框架更能减少回测误判</td></tr>
+    <tr><td>查询变复杂</td><td>加 DuckDB，不移动底层文件</td><td>可以直接 SQL 查询 Parquet</td></tr>
+    <tr><td>实盘、多用户、任务系统</td><td>再考虑 PostgreSQL / MySQL</td><td>需要事务、权限、并发、服务化</td></tr>
+  </tbody>
+</table>
+
+<p>你真正应该优先补的是数据源和数据口径：历史 ST、历史指数成分、历史行业分类、停复牌、涨跌停、复权因子独立表、财务公告日。这些会直接影响回测可信度。存储框架换得再漂亮，如果数据本身有前视偏差，回测还是会虚高。</p>
+
+<p><b>这章你需要记住的一件事</b>：当前不用急着换存储框架；先把数据质量、PIT 口径和读取规范做扎实。</p>
+
+<h1>10. 一个量化项目里推荐的 Parquet 组织方式</h1>
+
+<p><b>这章解决的问题</b>：给你一个以后整理数据目录的参考。</p>
+
+<p>一个清晰的数据目录，应该让人不用打开代码也大概知道每张表的用途。你的项目已经有这样的雏形：<code>normalized</code> 放清洗后的行情，<code>universe</code> 放股票池，<code>sector</code> 放行业，<code>benchmark</code> 放指数基准，<code>akshare</code> 放外部补充数据。</p>
+
+<table>
+  <thead><tr><th background-color="light-gray">目录</th><th background-color="light-gray">建议含义</th><th background-color="light-gray">例子</th></tr></thead>
+  <tbody>
+    <tr><td><code>raw</code></td><td>原始下载数据，尽量少改</td><td>QMT 原始日线</td></tr>
+    <tr><td><code>normalized</code></td><td>字段统一、口径清洗后的数据</td><td>全 A 日线、后复权日线</td></tr>
+    <tr><td><code>universe</code></td><td>研究池、可交易池、执行池</td><td>execution_universe.parquet</td></tr>
+    <tr><td><code>benchmark</code></td><td>指数基准</td><td>沪深 300 日线</td></tr>
+    <tr><td><code>sector</code></td><td>行业分类和行业成员</td><td>申万一级行业</td></tr>
+    <tr><td><code>quality</code></td><td>质量报告和缺口说明</td><td>data_gap_report.md</td></tr>
+    <tr><td><code>manifest</code></td><td>文件清单、行数、哈希、更新时间</td><td>manifest.json</td></tr>
+  </tbody>
+</table>
+
+<p>Manifest（清单文件——记录数据文件路径、行数、更新时间、校验信息的索引）很适合量化项目。它像仓库入库单：今天有什么数据、多少行、日期到哪天、是不是和上次一致，都应该有记录。没有清单时，数据多了以后很容易出现“我到底用的是哪一版行情”的问题。</p>
+
+<p><b>这章你需要记住的一件事</b>：好的数据目录不是为了好看，而是为了让每次回测结果可追溯。</p>
+
+<h1>11. 什么时候 Parquet 不够用</h1>
+
+<p><b>这章解决的问题</b>：避免把 Parquet 用到不适合的地方。</p>
+
+<p>Parquet 不够用，通常不是因为它“不高级”，而是因为任务类型变了。研究任务关心批量读取，生产任务关心状态一致。比如实盘系统里的订单状态、成交回报、风控指令、任务调度，不应该只靠一堆 Parquet 文件硬扛。</p>
+
+<table>
+  <thead><tr><th background-color="light-gray">信号</th><th background-color="light-gray">说明</th><th background-color="light-gray">可能的方案</th></tr></thead>
+  <tbody>
+    <tr><td>多人同时写入</td><td>多个程序同时改同一批数据</td><td>数据库或表格式数据湖</td></tr>
+    <tr><td>需要逐条更新</td><td>每秒都有订单状态变化</td><td>PostgreSQL / MySQL / Redis 等</td></tr>
+    <tr><td>需要权限和审计</td><td>谁改了什么要可追踪</td><td>数据库 + 权限系统</td></tr>
+    <tr><td>需要版本化大数据表</td><td>想回到任意历史版本</td><td>Delta Lake / Iceberg / Hudi 等</td></tr>
+    <tr><td>需要复杂 SQL 分析</td><td>多表 join、多条件筛选很多</td><td>DuckDB 先试，必要时再上服务端数据库</td></tr>
+  </tbody>
+</table>
+
+<p>Delta Lake / Iceberg / Hudi（表格式数据湖框架——在 Parquet 文件之上增加事务、版本、元数据管理的系统）可以理解成“给 Parquet 文件加一本账”。但它们也会带来维护成本。对你当前这个单人本地量化研究项目来说，现在就上这些框架，收益不一定大。</p>
+
+<p><b>这章你需要记住的一件事</b>：研究层继续用 Parquet 很合理；交易状态和多人协作层才更需要数据库能力。</p>
+
+<h1>12. 小练习：用 Parquet 做一次最小检查</h1>
+
+<p><b>这章解决的问题</b>：给你一个能马上动手的小任务。</p>
+
+<p>练习目标：检查后复权行情里最近 5 个交易日每天有多少只股票。这个练习不判断策略好坏，只训练一个基本能力：打开数据、选列、按日期聚合、看结果是否合理。</p>
+
+<pre lang="python" caption="检查最近交易日的股票数量"><code>import polars as pl
+
+path = "data/normalized/daily_bars_all_a_adjusted.parquet"
+# 金融含义：读取后复权全 A 日线，用来检查行情覆盖情况。
+
+result = (
+    pl.scan_parquet(path)
+    # 金融含义：scan 是懒加载，先描述要做什么，不急着把全量数据读进内存。
+    .group_by("datetime")
+    # 金融含义：按交易日分组，统计每天有多少股票有行情。
+    .agg(pl.col("vt_symbol").n_unique().alias("symbols"))
+    # 金融含义：每天不同股票代码的数量，就是当天行情覆盖的股票数量。
+    .sort("datetime", descending=True)
+    # 金融含义：把最近日期排在最上面。
+    .head(5)
+    .collect()
+    # 金融含义：真正执行计算，得到结果表。
+)
+
+print(result)
+# 金融含义：如果最近每天大约 5000 多只股票，说明全 A 覆盖大体正常。</code></pre>
+
+<p>你之前项目盘点里，最近几个交易日的后复权行情每天大约有 5194 到 5201 只股票。这和全 A 股数量级一致，说明主行情覆盖不是“小得离谱”的问题。真正要继续检查的是缺失值、停牌处理、复权口径、股票池过滤和 PIT 辅助数据。</p>
+
+<p><b>这章你需要记住的一件事</b>：打开 Parquet 后，第一步不是上策略，而是先做覆盖率和口径检查。</p>
+
+<h1>13. 术语速查表</h1>
+
+<p>这一节用于快速查词。飞书文档左侧目录可以直接跳到每个术语小节。</p>
+
+<h2>Parquet</h2>
+<p>Apache Parquet，一种列式存储文件格式。人话解释：把大表按列压缩保存，程序读少数几列时更快。最小例子：只读 <code>close</code> 算收益。</p>
+
+<h2>列式存储</h2>
+<p>Columnar Storage，同一列的数据连续存放。人话解释：把日期、代码、价格分别放进不同抽屉。最小例子：只拿收盘价抽屉。</p>
+
+<h2>行式存储</h2>
+<p>Row-oriented Storage，一条记录的所有字段放在一起。人话解释：像流水账，一行就是一天一只股票的完整记录。最小例子：CSV 每行一条行情。</p>
+
+<h2>CSV</h2>
+<p>Comma-Separated Values，逗号分隔值文本文件。人话解释：最朴素的表格文本格式，方便看但大数据下慢。最小例子：<code>date,code,close</code>。</p>
+
+<h2>DataFrame</h2>
+<p>DataFrame，二维表格数据结构。人话解释：Python 里用来装表格的对象，像程序里的 Excel。最小例子：三列行情表。</p>
+
+<h2>数据湖</h2>
+<p>Data Lake，集中存放多类数据的地方。人话解释：把原始行情、清洗行情、股票池、财务数据都放在一个有目录结构的仓库。最小例子：项目的 <code>data</code> 目录。</p>
+
+<h2>后复权</h2>
+<p>Backward Adjusted Price，把历史价格按后续分红送转等事件调整。人话解释：让历史收益率更连续，便于回测算涨跌。最小例子：用后复权 close 算动量。</p>
+
+<h2>未复权</h2>
+<p>Unadjusted Price，未经过分红送转调整的真实历史价格。人话解释：更接近当时看到的交易价格，常用于估算买多少股。最小例子：按未复权价格算 100 股整手。</p>
+
+<h2>PIT</h2>
+<p>Point-in-Time，时点正确数据。人话解释：历史回测在某一天只能用那一天已经知道的信息。最小例子：2021 年不能用 2026 年行业快照。</p>
+
+<h2>未来函数</h2>
+<p>Lookahead Bias，偷看未来数据。人话解释：回测时用了当时还不知道的信息，结果会虚高。最小例子：用明天收盘价决定今天买入。</p>
+
+<h2>压缩</h2>
+<p>Compression，用更少空间表示同样信息。人话解释：发现重复和规律，少写重复内容。最小例子：银行行业连续出现 100 次。</p>
+
+<h2>编码</h2>
+<p>Encoding，把数据转换成更适合保存或计算的表示方式。人话解释：给重复值编号，减少重复文本。最小例子：银行=1，证券=2。</p>
+
+<h2>DuckDB</h2>
+<p>DuckDB，本地分析型数据库。人话解释：可以直接用 SQL 查询 Parquet 文件，适合单机数据分析。最小例子：SQL 查询某天全 A 收盘价。</p>
+
+<h2>事务</h2>
+<p>Transaction，一组操作要么全部成功、要么全部失败。人话解释：订单、成交、持仓不能只写一半。最小例子：成交入库失败就回滚订单状态。</p>
+
+<h2>Manifest</h2>
+<p>Manifest，数据清单文件。人话解释：记录有哪些数据文件、多少行、日期范围、更新时间。最小例子：manifest.json 记录行情到 2026-07-08。</p>
+
+<h1>14. 最后的判断</h1>
+
+<p>回到你的项目，结论很明确：当前日频量价研究继续用 Parquet 是合理的。你已有的主行情数据量不小，后复权日线覆盖 2005 到 2026 年，足够支撑大量日频回测和因子检验。</p>
+
+<p>下一步更值得做的，不是马上换存储框架，而是把数据质量流程补齐：每次更新后自动检查行数、日期范围、股票数量、缺失值、异常价格、复权口径和 PIT 风险。等你开始做多人协作、实盘状态管理、复杂任务调度时，再把数据库引入对应层，而不是把所有研究数据一股脑搬走。</p>
+
+<p><b>一句话收尾</b>：Parquet 是你当前量化研究的数据地基；地基已经够用，接下来要做的是验收地基质量，而不是急着换一块更花哨的地砖。</p>

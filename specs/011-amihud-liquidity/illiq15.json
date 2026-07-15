@@ -1,0 +1,12 @@
+{
+  "industry_source": "gics1",
+  "industry_mode": "none",
+  "regime_top_n": 30,
+  "mom_window": 60,
+  "confirm_window": 20,
+  "trend_filters_enabled": false,
+  "score_weights": [-0.40, 0.35, -0.25],
+  "max_per_industry": 0,
+  "illiq_weight": 0.15,
+  "rebalance_freq": "monthly"
+}

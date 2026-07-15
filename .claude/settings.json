@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pytest --version)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -c \"import polars; print\\(polars.__version__\\)\")",
+      "Bash(python3 -c \"import sys; print\\(sys.executable\\); print\\(sys.path\\)\")",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pytest tests/alpha/research/test_mainline_industry_cap.py -q)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -c ' *)",
+      "Bash(/Users/xulandong/code8/vnpy/.venv/bin/pip install *)",
+      "Bash(/Users/xulandong/code8/vnpy/.venv/bin/python -m pip install akshare --quiet)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip3 uninstall *)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip3 install *)"
+    ]
+  }
+}

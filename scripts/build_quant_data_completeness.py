@@ -231,7 +231,9 @@ def _write_data_dictionary(data_root: Path) -> None:
 
 - `universe/all_a_symbols.parquet`: current full A-share instrument master from QMT.
 - `universe/index_members.parquet`: current index constituent snapshots for HS300, ZZ500, ZZ1000.
-- `normalized/daily_bars.parquet`: normalized full A-share daily OHLCV bars.
+- `silver/daily_bars_raw_price.parquet`: standard unadjusted full A-share daily OHLCV bars.
+- `silver/daily_bars_adjusted.parquet`: standard adjusted full A-share daily OHLCV bars.
+- `gold/execution_universe.parquet`: live/paper/backtest execution universe.
 - `universe/tradable_calendar.parquet`: daily tradability flags derived from bars and instrument metadata.
 - `benchmark/index_daily.parquet`: daily OHLCV bars for major benchmark indexes.
 - `calendar/trading_dates.parquet`: SH/SZ exchange trading dates.

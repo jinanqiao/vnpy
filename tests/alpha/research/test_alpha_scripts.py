@@ -68,6 +68,78 @@ def test_build_quant_data_completeness_parser_smoke() -> None:
     assert args.trading_date_count == 100
 
 
+def test_build_data_foundation_parser_smoke() -> None:
+    module = load_script("build_data_foundation.py")
+
+    args = module.parse_args(["--data-root", "lake", "--overwrite", "--json"])
+
+    assert args.data_root == "lake"
+    assert args.overwrite is True
+    assert args.json is True
+
+
+def test_check_data_gate_parser_smoke() -> None:
+    module = load_script("check_data_gate.py")
+
+    args = module.parse_args(["--data-root", "lake", "--mode", "live", "--as-of", "2026-07-14"])
+
+    assert args.data_root == "lake"
+    assert args.mode == "live"
+    assert args.as_of == "2026-07-14"
+
+
+def test_build_pit_tables_parser_smoke() -> None:
+    module = load_script("build_pit_tables.py")
+
+    args = module.parse_args(["--data-root", "lake", "--factor-change-threshold", "0.02", "--refresh-manifest", "--json"])
+
+    assert args.data_root == "lake"
+    assert args.factor_change_threshold == 0.02
+    assert args.refresh_manifest is True
+    assert args.json is True
+
+
+def test_run_mainline_signals_data_gate_mode_parser_smoke() -> None:
+    module = load_script("run_mainline_signals.py")
+
+    args = module.parse_args(["--data-gate-mode", "live"])
+    config = module.build_config(args)
+
+    assert args.data_gate_mode == "live"
+    assert config.data_gate_mode == "live"
+
+
+def test_diagnose_price_reconciliation_parser_smoke() -> None:
+    module = load_script("diagnose_price_reconciliation.py")
+
+    args = module.parse_args(["--data-root", "lake", "--recent-days", "10", "--coverage-min", "0.95", "--json"])
+
+    assert args.data_root == "lake"
+    assert args.recent_days == 10
+    assert args.coverage_min == 0.95
+    assert args.json is True
+
+
+def test_refresh_live_data_foundation_parser_smoke() -> None:
+    module = load_script("refresh_live_data_foundation.py")
+
+    args = module.parse_args(["--data-root", "lake", "--as-of", "2026-07-14", "--run-downloads"])
+
+    assert args.data_root == "lake"
+    assert args.as_of == "2026-07-14"
+    assert args.run_downloads is True
+
+
+def test_download_qmt_daily_bars_full_parser_smoke() -> None:
+    module = load_script("download_qmt_daily_bars_full.py")
+
+    args = module.parse_args(["--adjust", "back_ratio", "--limit", "3", "--resume"])
+
+    assert args.adjust == "back_ratio"
+    assert args.limit == 3
+    assert args.resume is True
+
+
 def test_validate_alpha_command_composition() -> None:
     module = load_script("validate_alpha.py")
 

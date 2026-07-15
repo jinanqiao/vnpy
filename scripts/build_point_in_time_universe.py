@@ -19,6 +19,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build PIT universe artifacts.")
     parser.add_argument("--data-root", default="data")
     parser.add_argument("--output-dir", default="data/universe")
+    parser.add_argument("--bars", default="data/silver/daily_bars_raw_price.parquet", help="用于构建股票池的未复权日线")
     parser.add_argument("--min-listed-days", type=int, default=120)
     parser.add_argument("--min-price", type=float, default=2.0)
     parser.add_argument("--min-avg-turnover", type=float, default=20_000_000.0)
@@ -40,7 +41,7 @@ def main() -> None:
     summary = build_pit_universe(
         symbols_df=pl.read_parquet(data_root / "universe" / "all_a_symbols.parquet"),
         trading_dates_df=pl.read_parquet(data_root / "calendar" / "trading_dates.parquet"),
-        daily_bars=pl.read_parquet(data_root / "normalized" / "daily_bars.parquet"),
+        daily_bars=pl.read_parquet(args.bars),
         output_dir=args.output_dir,
         config=config,
     )
